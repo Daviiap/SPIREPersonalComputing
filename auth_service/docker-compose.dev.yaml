@@ -1,0 +1,24 @@
+services:
+  flyway:
+    image: flyway/flyway
+    command: migrate -schemas=users
+    volumes:
+      - ./flyway.conf.example:/flyway/conf/flyway.conf
+      - ./migrations:/flyway/sql
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:latest
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: 'pg_isready -U $$POSTGRES_USER'
+      interval: 5s
+      timeout: 30s
+      retries: 5

@@ -1,0 +1,4 @@
+flyway.url=jdbc:postgresql://postgres:5432/authservicedb
+flyway.user=postgres
+flyway.password=password
+flyway.baselineOnMigrate=true
