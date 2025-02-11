@@ -16,7 +16,8 @@ func NewUserRepository(db *sql.DB) repository.UserRepository {
 		db: db,
 	}
 
-	repo.Save(*domain.NewUser("jonh_doe", "john@example.com", "ACME Inc.", "password"))
+	// CREATE A EXAMPLE USER
+	repo.Save(*domain.NewUser("jonh_doe", "jonh_doe@example.org", "Example Org", "password"))
 
 	return repo
 }

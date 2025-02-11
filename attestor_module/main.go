@@ -10,10 +10,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 
 	pb "user_attestor_module/proto/user_attestor"
 
+	"github.com/joho/godotenv"
 	"google.golang.org/grpc"
 )
 
@@ -27,7 +27,15 @@ type LoginResponseBody struct {
 }
 
 func makeLoginRequest(user, password string) (string, error) {
-	url := "http://localhost:3080/login"
+	err := godotenv.Load("./.env")
+	if err != nil {
+		log.Printf("No .env file found, proceeding with system environment variables.")
+	}
+
+	auth_service_url := os.Getenv("AUTH_SERVICE_URL")
+	if auth_service_url == "" {
+		return "", fmt.Errorf("AUTH_SERVICE_URL not set")
+	}
 	method := "POST"
 
 	payload := LoginRequestBody{
@@ -40,7 +48,7 @@ func makeLoginRequest(user, password string) (string, error) {
 	}
 
 	client := &http.Client{}
-	req, err := http.NewRequest(method, url, strings.NewReader(string(payloadBytes)))
+	req, err := http.NewRequest(method, auth_service_url+"/login", strings.NewReader(string(payloadBytes)))
 
 	if err != nil {
 		return "", err
@@ -77,13 +85,8 @@ type server struct {
 }
 
 func (s *server) GetUserAttestation(ctx context.Context, in *pb.Empty) (*pb.UserAttestation, error) {
-
 	return &pb.UserAttestation{
-		UserInfo: &pb.UserInfo{
-			Name:         "davi",
-			Email:        "davi@email.com",
-			Organization: "nuvidio",
-		},
+		AttestationToken: s.Token,
 	}, nil
 }
 
@@ -126,16 +129,8 @@ func main() {
 	grpcServer := grpc.NewServer()
 	pb.RegisterAttestationServiceServer(grpcServer, &server{Token: token})
 
-	wg := new(sync.WaitGroup)
-	wg.Add(1)
-
-	go func() {
-		log.Printf("Server listening on unix://%s", socketPath)
-		if err := grpcServer.Serve(lis); err != nil {
-			log.Fatalf("Failed to serve: %v", err)
-		}
-		wg.Done()
-	}()
-
-	wg.Wait()
+	log.Printf("Server listening on unix://%s", socketPath)
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("Failed to serve: %v", err)
+	}
 }

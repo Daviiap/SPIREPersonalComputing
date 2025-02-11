@@ -4,13 +4,9 @@ import (
 	"context"
 	"strings"
 	"sync"
-	"wl/plugin/domain"
-	uamAdptr "wl/plugin/infrastructure/userAttestationModule"
-	uasAdptr "wl/plugin/infrastructure/userAuthService"
-	"wl/plugin/presentation"
 
 	"github.com/hashicorp/go-hclog"
-	"github.com/shirou/gopsutil/v4/process"
+	"github.com/hashicorp/hcl"
 	"github.com/spiffe/spire-plugin-sdk/pluginsdk"
 	workloadattestorv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/agent/workloadattestor/v1"
 	configv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/service/common/config/v1"
@@ -22,18 +18,19 @@ var (
 	_ pluginsdk.NeedsLogger = (*Plugin)(nil)
 )
 
-type PSProcessInfo struct {
-	*process.Process
+type Config struct {
+	UserAttestationServiceURL       string `hcl:"user_attestation_service_url"`
+	UserAttestationModuleSocketPath string `hcl:"user_attestation_module_path"`
 }
 
 type Plugin struct {
 	workloadattestorv1.UnimplementedWorkloadAttestorServer
 	configv1.UnimplementedConfigServer
-	configMtx          sync.RWMutex
-	config             *Config
-	logger             hclog.Logger
-	userAttestorModule presentation.UserAttestorModule
-	userAuthService    presentation.UserAuthService
+	configMtx             sync.RWMutex
+	config                *Config
+	logger                hclog.Logger
+	userAttestationModule *UserAttestorModule
+	userAuthService       *UserAuthService
 }
 
 func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestRequest) (*workloadattestorv1.AttestResponse, error) {
@@ -43,23 +40,25 @@ func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestReque
 		return nil, err
 	}
 
-	p.SetUserAttestorModule(uamAdptr.UserAttestorModuleAdaptor{SocketPath: config.UserAttestationModuleSocketPath})
-	p.SetUserAuthService(uasAdptr.UserAuthServiceAdaptor{ServiceURL: config.UserAttestationServiceURL})
+	userAttestationModule := NewUserAttestorModule(config.UserAttestationModuleSocketPath)
+	p.setUserAttestationModule(userAttestationModule)
 
-	// 1. Communicate with user attestor module to get data
-	attestationData, err := p.userAttestorModule.GetUserAttestationData()
+	userAttestationToken, err := p.userAttestationModule.GetUserAttestationData()
 	if err != nil {
-		p.logger.Error("Failed to get attestation data", "error", err)
+		p.logger.Error("Failed to get the user attestation token", "error", err)
 		return nil, err
 	}
-	// 2. Communicate with user auth service to validate token and data
-	attestationResult, err := p.userAuthService.ValidateData(attestationData)
-	if err != nil || !attestationResult.IsValid {
-		p.logger.Error("Failed to validate data "+attestationResult.Message, "error", err)
+
+	userAuthService := NewUserAuthService(config.UserAttestationServiceURL)
+	p.setUserAuthService(userAuthService)
+
+	isValid, userData := userAuthService.GetUserData(userAttestationToken.AttestationToken)
+	if !isValid {
+		p.logger.Error("Failed to get the user data", "error", err)
 		return nil, err
 	}
-	// 3. return selectors
-	selectors, err := p.buildSelectors(&attestationData.UserInfo)
+
+	selectors, err := p.buildSelectors(userData)
 	if err != nil {
 		p.logger.Error("Failed to build selectors", "error", err)
 		return nil, err
@@ -87,13 +86,19 @@ func (p *Plugin) SetLogger(logger hclog.Logger) {
 	p.logger = logger
 }
 
-// ======| private |======
-
-func (p *Plugin) SetUserAttestorModule(userAttestorModule presentation.UserAttestorModule) {
-	p.userAttestorModule = userAttestorModule
+func parseConfig(hclConfig string) (*Config, error) {
+	config := new(Config)
+	if err := hcl.Decode(config, hclConfig); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "failed to decode configuration: %v", err)
+	}
+	return config, nil
 }
 
-func (p *Plugin) SetUserAuthService(userAuthService presentation.UserAuthService) {
+func (p *Plugin) setUserAttestationModule(userAttestationModule *UserAttestorModule) {
+	p.userAttestationModule = userAttestationModule
+}
+
+func (p *Plugin) setUserAuthService(userAuthService *UserAuthService) {
 	p.userAuthService = userAuthService
 }
 
@@ -112,20 +117,12 @@ func (p *Plugin) getConfig() (*Config, error) {
 	return p.config, nil
 }
 
-func (p *Plugin) buildSelectors(userInfo *domain.UserInfo) ([]string, error) {
+func (p *Plugin) buildSelectors(userInfo *ResponseData) ([]string, error) {
 	selectors := []string{}
 
-	selectors = append(selectors, "name:"+strings.ToLower(strings.Replace(userInfo.Name, " ", "_", -1)))
-	selectors = append(selectors, "secret:"+userInfo.Secret)
-	selectors = append(selectors, "system:user_id:"+userInfo.SystemInfo.UserID)
-	selectors = append(selectors, "system:username:"+userInfo.SystemInfo.Username)
-	selectors = append(selectors, "system:group_id:"+userInfo.SystemInfo.GroupID)
-	selectors = append(selectors, "system:groupName:"+userInfo.SystemInfo.GroupName)
-
-	for _, group := range userInfo.SystemInfo.SupplementaryGroups {
-		selectors = append(selectors, "system:supplementary_group_id:"+group.GroupID)
-		selectors = append(selectors, "system:supplementary_group_name:"+group.GroupName)
-	}
+	selectors = append(selectors, "name:"+strings.ToLower(strings.Replace(userInfo.Username, " ", "_", -1)))
+	selectors = append(selectors, "email:"+strings.ToLower(strings.Replace(userInfo.Email, " ", "_", -1)))
+	selectors = append(selectors, "organization:"+strings.ToLower(strings.Replace(userInfo.Organization, " ", "_", -1)))
 
 	return selectors, nil
 }

@@ -73,12 +73,6 @@ func (c *LoginControllerHttp) verifyToken(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if output.Token == "" {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(json.RawMessage(`{"message": "Invalid credentials"}`))
-		return
-	}
-
 	if err := json.NewEncoder(w).Encode(output); err != nil {
 		http.Error(w, "Failed to encode JSON", http.StatusInternalServerError)
 	}
