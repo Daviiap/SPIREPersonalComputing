@@ -2,6 +2,10 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -10,6 +14,7 @@ import (
 	"github.com/spiffe/spire-plugin-sdk/pluginsdk"
 	workloadattestorv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/agent/workloadattestor/v1"
 	configv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/service/common/config/v1"
+	"golang.org/x/oauth2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -30,7 +35,56 @@ type Plugin struct {
 	config                *Config
 	logger                hclog.Logger
 	userAttestationModule *UserAttestorModule
-	userAuthService       *UserAuthService
+}
+
+type UserInfo struct {
+	Sub           string `json:"sub"`
+	GivenName     string `json:"given_name"`
+	FamilyName    string `json:"family_name"`
+	Nickname      string `json:"nickname"`
+	Name          string `json:"name"`
+	Picture       string `json:"picture"`
+	UpdatedAt     string `json:"updated_at"`
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+}
+
+func verifyToken(tokenString string) *UserInfo {
+	var token oauth2.Token
+	err := json.Unmarshal([]byte(tokenString), &token)
+	if err != nil {
+		fmt.Println("Error unmarshaling token:", err)
+	}
+	client := oauth2.NewClient(context.Background(), oauth2.StaticTokenSource(&token))
+
+	const auth0Domain = "https://dev-j58fwup7mk575dp2.us.auth0.com/"
+	req, err := http.NewRequest("GET", auth0Domain+"userinfo", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	req.Header.Add("Authorization", "Bearer "+tokenString)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Fatal(err)
+	}
+
+	var userInfo UserInfo
+	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
+		log.Fatal(err)
+	}
+
+	return &userInfo
+}
+
+func normalizeSelector(input string) string {
+	return strings.ReplaceAll(strings.TrimSpace(strings.ToLower(input)), " ", "_")
 }
 
 func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestRequest) (*workloadattestorv1.AttestResponse, error) {
@@ -49,19 +103,18 @@ func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestReque
 		return nil, err
 	}
 
-	userAuthService := NewUserAuthService(config.UserAttestationServiceURL)
-	p.setUserAuthService(userAuthService)
+	info := verifyToken(userAttestationToken.AttestationToken)
 
-	isValid, userData := userAuthService.GetUserData(userAttestationToken.AttestationToken)
-	if !isValid {
-		p.logger.Error("Failed to get the user data", "error", err)
-		return nil, err
-	}
-
-	selectors, err := p.buildSelectors(userData)
-	if err != nil {
-		p.logger.Error("Failed to build selectors", "error", err)
-		return nil, err
+	selectors := []string{
+		fmt.Sprintf("sub:%s", normalizeSelector(info.Sub)),
+		fmt.Sprintf("given_name:%s", normalizeSelector(info.GivenName)),
+		fmt.Sprintf("family_name:%s", normalizeSelector(info.FamilyName)),
+		fmt.Sprintf("nickname:%s", normalizeSelector(info.Nickname)),
+		fmt.Sprintf("name:%s", normalizeSelector(info.Name)),
+		fmt.Sprintf("picture:%s", normalizeSelector(info.Picture)),
+		fmt.Sprintf("updated_at:%s", normalizeSelector(info.UpdatedAt)),
+		fmt.Sprintf("email:%s", normalizeSelector(info.Email)),
+		fmt.Sprintf("email_verified:%t", info.EmailVerified),
 	}
 
 	return &workloadattestorv1.AttestResponse{
@@ -98,10 +151,6 @@ func (p *Plugin) setUserAttestationModule(userAttestationModule *UserAttestorMod
 	p.userAttestationModule = userAttestationModule
 }
 
-func (p *Plugin) setUserAuthService(userAuthService *UserAuthService) {
-	p.userAuthService = userAuthService
-}
-
 func (p *Plugin) setConfig(config *Config) {
 	p.configMtx.Lock()
 	defer p.configMtx.Unlock()
@@ -115,14 +164,4 @@ func (p *Plugin) getConfig() (*Config, error) {
 		return nil, status.Error(codes.FailedPrecondition, "not configured")
 	}
 	return p.config, nil
-}
-
-func (p *Plugin) buildSelectors(userInfo *ResponseData) ([]string, error) {
-	selectors := []string{}
-
-	selectors = append(selectors, "name:"+strings.ToLower(strings.Replace(userInfo.Username, " ", "_", -1)))
-	selectors = append(selectors, "email:"+strings.ToLower(strings.Replace(userInfo.Email, " ", "_", -1)))
-	selectors = append(selectors, "organization:"+strings.ToLower(strings.Replace(userInfo.Organization, " ", "_", -1)))
-
-	return selectors, nil
 }

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Autenticação concluída</title>
+    <style>
+        body {
+            background-color: rgb(37, 37, 37);
+            color: rgb(219, 219, 219);
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+
+        h1 {
+            font-size: 36px;
+            margin-top: 50px;
+        }
+
+        img {
+            width: 200px;
+            height: auto;
+        }
+
+        button {
+            background-color: rgb(50, 50, 50);
+            color: rgb(219, 219, 219);
+            font-size: 18px;
+            padding: 10px 20px;
+            margin-top: 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+
+        button:hover {
+            background-color: rgb(70, 70, 70);
+        }
+    </style>
+    <script type="text/javascript">
+        setTimeout(function () {
+            window.close();
+        }, 5000);
+
+        function closeWindow() {
+            window.close();
+        }
+    </script>
+</head>
+
+<body>
+    <img src="https://spiffe.io/img/logos/spire/icon/color/spire-icon-color.png" alt="Ícone Spire">
+    <h1>Autenticação realizada com sucesso!</h1>
+    <button onclick="closeWindow()">OK</button>
+</body>
+
+</html>

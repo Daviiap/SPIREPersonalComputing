@@ -5,7 +5,7 @@ DIST_DIR=dist
 all: build
 
 build: $(DIST_DIR)
-	go build -o $(DIST_DIR)/$(BINARY_NAME) main.go
+	go build -o $(DIST_DIR)/$(BINARY_NAME) cmd/main.go
 
 $(DIST_DIR):
 	mkdir -p $(DIST_DIR)
