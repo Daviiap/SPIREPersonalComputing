@@ -4,16 +4,22 @@ go 1.23.3
 
 require (
 	google.golang.org/grpc v1.70.0
-	google.golang.org/protobuf v1.35.2
+	google.golang.org/protobuf v1.36.1
 )
 
 require (
-	golang.org/x/net v0.32.0 // indirect
+	github.com/Microsoft/go-winio v0.6.2 // indirect
+	github.com/go-jose/go-jose/v4 v4.0.4 // indirect
+	github.com/zeebo/errs v1.4.0 // indirect
+	golang.org/x/crypto v0.31.0 // indirect
+	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20241202173237-19429a94021a // indirect
 )
 
 require (
 	github.com/joho/godotenv v1.5.1
-	golang.org/x/sys v0.29.0 // indirect
+	github.com/spiffe/go-spiffe/v2 v2.5.0
+	golang.org/x/sys v0.31.0 // indirect
+	golang.org/x/term v0.30.0
 )

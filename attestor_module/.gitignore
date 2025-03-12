@@ -1,0 +1,6 @@
+dist
+svids/*.key
+svids/*.pem
+svids/*.crt
+svids/*.csr
+svids/*.srl
