@@ -15,13 +15,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
-const (
-	auth0Domain = "https://dev-j58fwup7mk575dp2.us.auth0.com/"
-	clientID    = "4Y91oT15gWZNvij29CTb8WmhPxsSpvbk"
-	redirectURI = "http://localhost:3083/"
-)
-
-func Authenticate(ctx context.Context) (*oauth2.Token, error) {
+func Authenticate(ctx context.Context, auth0Domain, clientID, redirectURI, callBackPort string) (*oauth2.Token, error) {
 	provider, err := oidc.NewProvider(ctx, auth0Domain)
 	if err != nil {
 		return nil, fmt.Errorf("error creating OIDC provider: %v", err)
@@ -64,7 +58,7 @@ func Authenticate(ctx context.Context) (*oauth2.Token, error) {
 	})
 
 	server := http.Server{
-		Addr: ":3083",
+		Addr: ":" + callBackPort,
 	}
 	go func() {
 		log.Info("Starting HTTP server to handle login")

@@ -16,8 +16,6 @@ import (
 	"google.golang.org/grpc"
 )
 
-const grpcSocketPath = "/tmp/user_attestor_module.sock"
-
 type server struct {
 	pb.UnimplementedAttestationServiceServer
 	Token string
@@ -33,7 +31,7 @@ func (s *server) GetUserAttestation(ctx context.Context, in *pb.Empty) (*pb.User
 	return &pb.UserAttestation{AttestationToken: s.Token}, nil
 }
 
-func ServeModule(ctx context.Context) {
+func ServeModule(ctx context.Context, auth0Domain, clientID, redirectURI, grpcSocketPath, callBackPort string) {
 	if err := os.RemoveAll(grpcSocketPath); err != nil {
 		log.Warnf("Failed to remove socket file: %v", err)
 	}
@@ -45,7 +43,7 @@ func ServeModule(ctx context.Context) {
 			log.Fatalf("Failed to listen: %v", err)
 		}
 
-		token, err := auth.Authenticate(ctx)
+		token, err := auth.Authenticate(ctx, auth0Domain, clientID, redirectURI, callBackPort)
 		if err != nil {
 			log.Fatalf("Authentication error: %v", err)
 		}
