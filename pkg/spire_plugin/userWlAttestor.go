@@ -26,6 +26,7 @@ var (
 type Config struct {
 	UserAttestationServiceURL       string `hcl:"user_attestation_service_url"`
 	UserAttestationModuleSocketPath string `hcl:"user_attestation_module_path"`
+	Auth0Domain                     string `hcl:"auth0_domain"`
 }
 
 type Plugin struct {
@@ -49,7 +50,7 @@ type UserInfo struct {
 	EmailVerified bool   `json:"email_verified"`
 }
 
-func verifyToken(tokenString string) *UserInfo {
+func (p *Plugin) verifyToken(tokenString string) *UserInfo {
 	var token oauth2.Token
 	err := json.Unmarshal([]byte(tokenString), &token)
 	if err != nil {
@@ -57,12 +58,10 @@ func verifyToken(tokenString string) *UserInfo {
 	}
 	client := oauth2.NewClient(context.Background(), oauth2.StaticTokenSource(&token))
 
-	const auth0Domain = "https://dev-j58fwup7mk575dp2.us.auth0.com/"
-	req, err := http.NewRequest("GET", auth0Domain+"userinfo", nil)
+	req, err := http.NewRequest("GET", p.config.Auth0Domain+"userinfo", nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	req.Header.Add("Authorization", "Bearer "+tokenString)
 
 	resp, err := client.Do(req)
@@ -97,13 +96,18 @@ func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestReque
 	userAttestationModule := NewUserAttestorModule(config.UserAttestationModuleSocketPath)
 	p.setUserAttestationModule(userAttestationModule)
 
-	userAttestationToken, err := p.userAttestationModule.GetUserAttestationData()
+	attestationData, err := p.userAttestationModule.GetUserAttestationData()
 	if err != nil {
 		p.logger.Error("Failed to get the user attestation token", "error", err)
 		return nil, err
 	}
 
-	info := verifyToken(userAttestationToken.AttestationToken)
+	attestationDataJSON, err := json.Marshal(attestationData)
+	if err != nil {
+		p.logger.Error("Failed to marshal the user attestation token", "error", err)
+		return nil, err
+	}
+	info := p.verifyToken(string(attestationDataJSON))
 
 	selectors := []string{
 		fmt.Sprintf("sub:%s", normalizeSelector(info.Sub)),

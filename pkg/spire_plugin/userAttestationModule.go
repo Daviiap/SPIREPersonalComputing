@@ -5,7 +5,7 @@ import (
 	"log"
 	"time"
 
-	pb "wl/proto/user_attestor"
+	pb "spire-pc/proto/user_attestor"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

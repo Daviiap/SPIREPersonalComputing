@@ -2,7 +2,6 @@ package attestation
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -10,15 +9,15 @@ import (
 	"net"
 	"os"
 
-	"github.com/davi/attestor-cli/pkg/auth"
-	pb "github.com/davi/attestor-cli/proto/user_attestor"
+	"spire-pc/pkg/attestation_module/auth"
+	pb "spire-pc/proto/user_attestor"
 
 	"google.golang.org/grpc"
 )
 
 type server struct {
 	pb.UnimplementedAttestationServiceServer
-	Token string
+	token tokenInfo
 }
 
 type tokenInfo struct {
@@ -28,7 +27,11 @@ type tokenInfo struct {
 }
 
 func (s *server) GetUserAttestation(ctx context.Context, in *pb.Empty) (*pb.UserAttestation, error) {
-	return &pb.UserAttestation{AttestationToken: s.Token}, nil
+	return &pb.UserAttestation{
+		AccessToken: s.token.AccessToken,
+		TokenType:   s.token.TokenType,
+		Expiry:      s.token.Expiry,
+	}, nil
 }
 
 func ServeModule(ctx context.Context, auth0Domain, clientID, redirectURI, grpcSocketPath, callBackPort string) {
@@ -55,12 +58,10 @@ func ServeModule(ctx context.Context, auth0Domain, clientID, redirectURI, grpcSo
 			TokenType:   token.TokenType,
 			Expiry:      token.Expiry.Format(time.RFC3339),
 		}
-		tokenInfoJSON, err := json.Marshal(tokenInfostruct)
-		if err != nil {
-			log.Fatalf("Failed to encode token information to JSON: %v", err)
-		}
 
-		pb.RegisterAttestationServiceServer(grpcServer, &server{Token: string(tokenInfoJSON)})
+		pb.RegisterAttestationServiceServer(grpcServer, &server{
+			token: tokenInfostruct,
+		})
 
 		go func() {
 			<-ctx.Done()

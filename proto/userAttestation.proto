@@ -6,7 +6,9 @@ option go_package = "proto/user_attestor;user_attestor";
 
 // Message definitions
 message UserAttestation {
-  string attestation_token = 1;
+  string access_token = 1;
+  string token_type = 2;
+  string expiry = 3;
 }
 
 // Define the service

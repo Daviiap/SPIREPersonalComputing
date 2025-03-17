@@ -9,7 +9,7 @@ import (
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/davi/attestor-cli/pkg/attestation"
+	"spire-pc/pkg/attestation_module/attestation"
 )
 
 func WaitForCtrlC(cancel context.CancelFunc) {
