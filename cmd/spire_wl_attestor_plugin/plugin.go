@@ -1,7 +1,7 @@
 package main
 
 import (
-	plugin "spire-pc/pkg/spire_plugin"
+	plugin "spire-pc/pkg/spire_wl_attestor_plugin"
 
 	"github.com/spiffe/spire-plugin-sdk/pluginmain"
 	workloadattestorv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/agent/workloadattestor/v1"
