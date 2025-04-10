@@ -1,11 +1,14 @@
 package plugin
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -51,14 +54,20 @@ type UserInfo struct {
 }
 
 func (p *Plugin) verifyToken(tokenString string) *UserInfo {
+	config, err := p.getConfig()
+	if err != nil {
+		p.logger.Error("Failed to get the configuration", "error", err)
+		return nil
+	}
+
 	var token oauth2.Token
-	err := json.Unmarshal([]byte(tokenString), &token)
+	err = json.Unmarshal([]byte(tokenString), &token)
 	if err != nil {
 		fmt.Println("Error unmarshaling token:", err)
 	}
 	client := oauth2.NewClient(context.Background(), oauth2.StaticTokenSource(&token))
 
-	req, err := http.NewRequest("GET", p.config.Auth0Domain+"userinfo", nil)
+	req, err := http.NewRequest("GET", config.Auth0Domain+"userinfo", nil)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -86,14 +95,73 @@ func normalizeSelector(input string) string {
 	return strings.ReplaceAll(strings.TrimSpace(strings.ToLower(input)), " ", "_")
 }
 
-func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestRequest) (*workloadattestorv1.AttestResponse, error) {
-	config, err := p.getConfig()
+func (p *Plugin) getSocketPath(pid string) string {
+	fdDir := filepath.Join("/proc", pid, "fd")
+	fdEntries, err := os.ReadDir(fdDir)
 	if err != nil {
-		p.logger.Error("Failed to get the configuration", "error", err)
-		return nil, err
+		p.logger.Error("Failed to read %s: %v\n", fdDir, err)
+		return ""
 	}
 
-	userAttestationModule := NewUserAttestorModule(config.UserAttestationModuleSocketPath)
+	inodes := map[string]struct{}{}
+	for _, entry := range fdEntries {
+		linkPath := filepath.Join(fdDir, entry.Name())
+		target, err := os.Readlink(linkPath)
+		if err != nil {
+			continue
+		}
+
+		if strings.HasPrefix(target, "socket:[") {
+			inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
+			inodes[inode] = struct{}{}
+		}
+	}
+
+	if len(inodes) == 0 {
+		p.logger.Error("No sockets found for the given PID.")
+		return ""
+	}
+
+	f, err := os.Open("/proc/net/unix")
+	if err != nil {
+		p.logger.Error("Failed to open /proc/net/unix: %v\n", err)
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if strings.HasPrefix(line, "Num") {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) >= 7 {
+			inode := fields[6]
+			if _, ok := inodes[inode]; ok {
+				path := ""
+				if len(fields) >= 8 {
+					path = fields[7]
+				}
+				if path != "" {
+					return path
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestRequest) (*workloadattestorv1.AttestResponse, error) {
+	userAttestationModuleSocketPath := p.getSocketPath(fmt.Sprintf("%d", req.Pid))
+
+	if userAttestationModuleSocketPath == "" {
+		return nil, status.Error(codes.FailedPrecondition, "no user attestation module socket path found")
+	}
+
+	userAttestationModule := NewUserAttestorModule(userAttestationModuleSocketPath)
 	p.setUserAttestationModule(userAttestationModule)
 
 	attestationData, err := p.userAttestationModule.GetUserAttestationData()
