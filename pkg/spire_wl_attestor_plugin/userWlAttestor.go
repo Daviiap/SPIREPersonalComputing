@@ -27,9 +27,7 @@ var (
 )
 
 type Config struct {
-	UserAttestationServiceURL       string `hcl:"user_attestation_service_url"`
-	UserAttestationModuleSocketPath string `hcl:"user_attestation_module_path"`
-	Auth0Domain                     string `hcl:"auth0_domain"`
+	Auth0Domain string `hcl:"auth0_domain"`
 }
 
 type Plugin struct {
