@@ -1,15 +1,17 @@
 package spirenodeattestoragentplugin
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/gob"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"os"
+	"spire-pc/pkg/spire_node_attestor_plugin/common"
 	"sync"
 
 	"github.com/google/go-attestation/attest"
@@ -36,24 +38,6 @@ type Plugin struct {
 	configMtx sync.RWMutex
 	config    *Config
 	logger    hclog.Logger
-}
-
-type ParsibleAttestationParams struct {
-	Public                  []byte `json:"public"`
-	UseTCSDActivationFormat bool   `json:"useTCSDActivationFormat"`
-	CreateData              []byte `json:"createData"`
-	CreateAttestation       []byte `json:"createAttestation"`
-	CreateSignature         []byte `json:"createSignature"`
-}
-
-type AttestationPayload struct {
-	EkPub             []byte                    `json:"ekPub"`
-	AttestationParams ParsibleAttestationParams `json:"attestationParams"`
-}
-
-type ChallengePayload struct {
-	Credential []byte `json:"credential"`
-	Secret     []byte `json:"secret"`
 }
 
 func publicKeyToBytes(pub crypto.PublicKey) ([]byte, error) {
@@ -87,39 +71,32 @@ func (p *Plugin) AidAttestation(stream nodeattestorv1.NodeAttestor_AidAttestatio
 	config := &attest.OpenConfig{}
 	tpm, err := attest.OpenTPM(config)
 	if err != nil {
-		return status.Error(codes.Internal, "error oppening tpm")
+		return err
 	}
+	defer tpm.Close()
 
 	eks, err := tpm.EKs()
 	if err != nil {
-		return status.Error(codes.Internal, "error fetching TPM EKs")
+		return err
 	}
 	ek := eks[0]
 
 	akConfig := &attest.AKConfig{}
 	ak, err := tpm.NewAK(akConfig)
 	if err != nil {
-		return status.Error(codes.Internal, "error creating AK")
+		return err
 	}
+	defer ak.Close(tpm)
 	attestParams := ak.AttestationParameters()
-
-	akBytes, err := ak.Marshal()
-	if err != nil {
-		return status.Error(codes.Internal, "error marshaling AK")
-	}
-
-	if err := os.WriteFile("encrypted_aik.json", akBytes, 0600); err != nil {
-		return status.Error(codes.Internal, "error writing encrypted_aik.json")
-	}
 
 	keyBytes, err := publicKeyToBytes(ek.Public)
 	if err != nil {
-		return status.Error(codes.Internal, "error converting public key to bytes")
+		return err
 	}
 
-	attestationPayload := AttestationPayload{
+	attestationPayload := common.EkAttestationMsg{
 		EkPub: keyBytes,
-		AttestationParams: ParsibleAttestationParams{
+		AttestationParams: common.AttestationParams{
 			Public:                  attestParams.Public,
 			UseTCSDActivationFormat: attestParams.UseTCSDActivationFormat,
 			CreateData:              attestParams.CreateData,
@@ -129,7 +106,7 @@ func (p *Plugin) AidAttestation(stream nodeattestorv1.NodeAttestor_AidAttestatio
 	}
 	attestationBytes, err := json.Marshal(attestationPayload)
 	if err != nil {
-		return status.Error(codes.Internal, "error marshaling attestation payload")
+		return err
 	}
 
 	err = stream.Send(&nodeattestorv1.PayloadOrChallengeResponse{
@@ -138,33 +115,25 @@ func (p *Plugin) AidAttestation(stream nodeattestorv1.NodeAttestor_AidAttestatio
 		},
 	})
 	if err != nil {
-		return status.Error(codes.Internal, "error sending payload")
+		return err
 	}
 
 	challenge, err := stream.Recv()
 	if err != nil {
-		return status.Error(codes.Internal, "error receiving challenge")
+		return err
 	}
 
-	challengePayload := ChallengePayload{}
+	challengePayload := common.ChallengePayload{}
 	if err := json.Unmarshal(challenge.GetChallenge(), &challengePayload); err != nil {
-		return status.Error(codes.Internal, "error unmarshaling challenge payload")
+		return err
 	}
 
-	akBytes, err = os.ReadFile("encrypted_aik.json")
-	if err != nil {
-		return status.Error(codes.Internal, "error reading encrypted_aik.json")
-	}
-	ak, err = tpm.LoadAK(akBytes)
-	if err != nil {
-		return status.Error(codes.Internal, "error loading AK")
-	}
 	secretClient, err := ak.ActivateCredential(tpm, attest.EncryptedCredential{
 		Credential: challengePayload.Credential,
 		Secret:     challengePayload.Secret,
 	})
 	if err != nil {
-		return status.Error(codes.Internal, "error activating credential")
+		return err
 	}
 
 	err = stream.Send(&nodeattestorv1.PayloadOrChallengeResponse{
@@ -173,7 +142,34 @@ func (p *Plugin) AidAttestation(stream nodeattestorv1.NodeAttestor_AidAttestatio
 		},
 	})
 	if err != nil {
-		return status.Error(codes.Internal, "error sending challenge response")
+		return err
+	}
+
+	challenge, err = stream.Recv()
+	if err != nil {
+		return err
+	}
+
+	nonce := challenge.GetChallenge()
+
+	platformAttestation, err := tpm.AttestPlatform(ak, nonce, &attest.PlatformAttestConfig{})
+	if err != nil {
+		return err
+	}
+
+	var buffer bytes.Buffer
+	encodder := gob.NewEncoder(&buffer)
+	if err := encodder.Encode(platformAttestation); err != nil {
+		return err
+	}
+
+	err = stream.Send(&nodeattestorv1.PayloadOrChallengeResponse{
+		Data: &nodeattestorv1.PayloadOrChallengeResponse_ChallengeResponse{
+			ChallengeResponse: buffer.Bytes(),
+		},
+	})
+	if err != nil {
+		return err
 	}
 
 	return nil

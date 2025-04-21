@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/gob"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"net/url"
 	"path"
+	"spire-pc/pkg/spire_node_attestor_plugin/common"
+	"strings"
 	"sync"
 
 	"github.com/google/go-attestation/attest"
@@ -57,24 +62,6 @@ func publicKeyFromBytes(publicKeyBytes []byte) (crypto.PublicKey, error) {
 	return genericPublicKey, nil
 }
 
-type ParsibleAttestationParams struct {
-	Public                  []byte `json:"public"`
-	UseTCSDActivationFormat bool   `json:"useTCSDActivationFormat"`
-	CreateData              []byte `json:"createData"`
-	CreateAttestation       []byte `json:"createAttestation"`
-	CreateSignature         []byte `json:"createSignature"`
-}
-
-type AttestationPayload struct {
-	EkPub             []byte                    `json:"ekPub"`
-	AttestationParams ParsibleAttestationParams `json:"attestationParams"`
-}
-
-type ChallengePayload struct {
-	Credential []byte `json:"credential"`
-	Secret     []byte `json:"secret"`
-}
-
 func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 	config, err := p.getConfig()
 	if err != nil {
@@ -86,7 +73,7 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 		return err
 	}
 
-	attestationPayload := AttestationPayload{}
+	attestationPayload := common.EkAttestationMsg{}
 	if err := json.Unmarshal(payload.GetPayload(), &attestationPayload); err != nil {
 		return err
 	}
@@ -112,7 +99,7 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 		return err
 	}
 
-	challenge, err := json.Marshal(ChallengePayload{
+	challenge, err := json.Marshal(common.ChallengePayload{
 		Credential: encryptedCredentials.Credential,
 		Secret:     encryptedCredentials.Secret,
 	})
@@ -138,15 +125,88 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 		return status.Error(codes.Internal, "challenge response does not match")
 	}
 
+	nonce := make([]byte, 32)
+	_, err = rand.Read(nonce)
+	if err != nil {
+		return err
+	}
+	err = stream.Send(&nodeattestorv1.AttestResponse{
+		Response: &nodeattestorv1.AttestResponse_Challenge{
+			Challenge: nonce,
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	response, err = stream.Recv()
+	if err != nil {
+		return err
+	}
+
+	platformAttestation := response.GetChallengeResponse()
+
+	var platformInfo attest.PlatformParameters
+
+	decodder := gob.NewDecoder(bytes.NewBuffer(platformAttestation))
+	if err := decodder.Decode(&platformInfo); err != nil {
+		return err
+	}
+
+	pubAk, err := attest.ParseAKPublic(attest.TPMVersion20, params.AK.Public)
+	if err != nil {
+		log.Fatalf("Failed to parse AK public: %v", err)
+	}
+
+	for _, q := range platformInfo.Quotes {
+		if err := pubAk.Verify(q, platformInfo.PCRs, nonce); err != nil {
+			return err
+		}
+	}
+
+	eventLog, err := attest.ParseEventLog(platformInfo.EventLog)
+	if err != nil {
+		return err
+	}
+
+	events, err := eventLog.Verify(platformInfo.PCRs)
+	if err != nil {
+		return err
+	}
+
+	selectors, err := buildSelectors(platformInfo, attestationPayload.EkPub, events)
+	if err != nil {
+		return err
+	}
+
 	return stream.Send(&nodeattestorv1.AttestResponse{
 		Response: &nodeattestorv1.AttestResponse_AgentAttributes{
 			AgentAttributes: &nodeattestorv1.AgentAttributes{
 				SpiffeId:       AgentID("tpm", config.trustDomain.String(), attestationPayload.EkPub),
-				SelectorValues: []string{"tpm:attested:true"},
+				SelectorValues: selectors,
 				CanReattest:    true,
 			},
 		},
 	})
+}
+
+func buildSelectors(platformInfo attest.PlatformParameters, ek []byte, events []attest.Event) ([]string, error) {
+	selectors := []string{}
+
+	selectors = append(selectors, fmt.Sprintf("ek:%x", sha256.Sum256(ek)))
+
+	for _, pcr := range platformInfo.PCRs {
+		alg := strings.ReplaceAll(strings.ToLower(pcr.DigestAlg.String()), "-", "")
+		selectors = append(selectors, fmt.Sprintf("pcr:%d:%s:%x", pcr.Index, alg, pcr.Digest))
+	}
+
+	if platformInfo.TPMVersion == attest.TPMVersion12 {
+		selectors = append(selectors, "version:12")
+	} else {
+		selectors = append(selectors, "version:20")
+	}
+
+	return selectors, nil
 }
 
 func AgentID(pluginName, trustDomain string, ekPub []byte) string {
