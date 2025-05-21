@@ -86,7 +86,11 @@ func (p *Plugin) AidAttestation(stream nodeattestorv1.NodeAttestor_AidAttestatio
 	if err != nil {
 		return err
 	}
-	defer ak.Close(tpm)
+	defer func() {
+		if err := ak.Close(tpm); err != nil {
+			p.logger.Error("Error closing AK: %v", err)
+		}
+	}()
 	attestParams := ak.AttestationParameters()
 
 	keyBytes, err := publicKeyToBytes(ek.Public)
