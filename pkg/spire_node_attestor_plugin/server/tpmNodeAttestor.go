@@ -200,12 +200,6 @@ func buildSelectors(platformInfo attest.PlatformParameters, ek []byte, events []
 		selectors = append(selectors, fmt.Sprintf("pcr:%d:%s:%x", pcr.Index, alg, pcr.Digest))
 	}
 
-	if platformInfo.TPMVersion == attest.TPMVersion12 {
-		selectors = append(selectors, "version:12")
-	} else {
-		selectors = append(selectors, "version:20")
-	}
-
 	return selectors, nil
 }
 
