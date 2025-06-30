@@ -3,7 +3,6 @@ package spirenodeattestorserverplugin
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -48,18 +47,18 @@ type Plugin struct {
 	logger hclog.Logger
 }
 
-func publicKeyFromBytes(publicKeyBytes []byte) (crypto.PublicKey, error) {
-	block, _ := pem.Decode(publicKeyBytes)
+func bytesToCert(certBytes []byte) (x509.Certificate, error) {
+	block, _ := pem.Decode(certBytes)
 	if block != nil {
-		publicKeyBytes = block.Bytes
+		certBytes = block.Bytes
 	}
 
-	genericPublicKey, err := x509.ParsePKIXPublicKey(publicKeyBytes)
+	cert, err := x509.ParseCertificate(certBytes)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing public key: %w", err)
+		return x509.Certificate{}, fmt.Errorf("error parsing certificate: %w", err)
 	}
 
-	return genericPublicKey, nil
+	return *cert, nil
 }
 
 func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
@@ -78,10 +77,12 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 		return err
 	}
 
-	ekPub, err := publicKeyFromBytes(attestationPayload.EkPub)
+	ekCert, err := bytesToCert(attestationPayload.EkCert)
 	if err != nil {
 		return err
 	}
+
+	ekPub := ekCert.PublicKey
 
 	params := attest.ActivationParameters{
 		TPMVersion: attest.TPMVersion20,
@@ -174,7 +175,7 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 		return err
 	}
 
-	selectors, err := buildSelectors(platformInfo, attestationPayload.EkPub, events)
+	selectors, err := buildSelectors(platformInfo, attestationPayload.EkCert, events)
 	if err != nil {
 		return err
 	}
@@ -182,7 +183,7 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 	return stream.Send(&nodeattestorv1.AttestResponse{
 		Response: &nodeattestorv1.AttestResponse_AgentAttributes{
 			AgentAttributes: &nodeattestorv1.AgentAttributes{
-				SpiffeId:       AgentID("tpm", config.trustDomain.String(), attestationPayload.EkPub),
+				SpiffeId:       AgentID("tpm", config.trustDomain.String(), attestationPayload.EkCert),
 				SelectorValues: selectors,
 				CanReattest:    true,
 			},

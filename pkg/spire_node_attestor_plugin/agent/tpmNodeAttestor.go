@@ -93,13 +93,8 @@ func (p *Plugin) AidAttestation(stream nodeattestorv1.NodeAttestor_AidAttestatio
 	}()
 	attestParams := ak.AttestationParameters()
 
-	keyBytes, err := publicKeyToBytes(ek.Public)
-	if err != nil {
-		return err
-	}
-
 	attestationPayload := common.EkAttestationMsg{
-		EkPub: keyBytes,
+		EkCert: ek.Certificate.Raw,
 		AttestationParams: common.AttestationParams{
 			Public:                  attestParams.Public,
 			UseTCSDActivationFormat: attestParams.UseTCSDActivationFormat,

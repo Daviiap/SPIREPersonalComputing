@@ -9,7 +9,7 @@ type AttestationParams struct {
 }
 
 type EkAttestationMsg struct {
-	EkPub             []byte            `json:"ekPub"`
+	EkCert            []byte            `json:"ekPub"`
 	AttestationParams AttestationParams `json:"attestationParams"`
 }
 
