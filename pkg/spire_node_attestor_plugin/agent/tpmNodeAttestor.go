@@ -3,29 +3,18 @@ package spirenodeattestoragentplugin
 import (
 	"bytes"
 	"context"
-	"crypto"
-	"crypto/ecdsa"
-	"crypto/rsa"
-	"crypto/x509"
 	"encoding/gob"
 	"encoding/json"
-	"encoding/pem"
-	"fmt"
 	"spire-pc/pkg/spire_node_attestor_plugin/common"
 	"sync"
 
 	"github.com/google/go-attestation/attest"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/hcl"
-	"github.com/spiffe/spire-plugin-sdk/pluginsdk"
 	nodeattestorv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/agent/nodeattestor/v1"
 	configv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/service/common/config/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-)
-
-var (
-	_ pluginsdk.NeedsLogger = (*Plugin)(nil)
 )
 
 type Config struct {
@@ -38,33 +27,6 @@ type Plugin struct {
 	configMtx sync.RWMutex
 	config    *Config
 	logger    hclog.Logger
-}
-
-func publicKeyToBytes(pub crypto.PublicKey) ([]byte, error) {
-	switch pub := pub.(type) {
-	case *rsa.PublicKey:
-		pubASN1, err := x509.MarshalPKIXPublicKey(pub)
-		if err != nil {
-			return nil, err
-		}
-		pubBytes := pem.EncodeToMemory(&pem.Block{
-			Type:  "RSA PUBLIC KEY",
-			Bytes: pubASN1,
-		})
-		return pubBytes, nil
-	case *ecdsa.PublicKey:
-		pubASN1, err := x509.MarshalPKIXPublicKey(pub)
-		if err != nil {
-			return nil, err
-		}
-		pubBytes := pem.EncodeToMemory(&pem.Block{
-			Type:  "EC PUBLIC KEY",
-			Bytes: pubASN1,
-		})
-		return pubBytes, nil
-	default:
-		return nil, fmt.Errorf("unsupported public key type")
-	}
 }
 
 func (p *Plugin) AidAttestation(stream nodeattestorv1.NodeAttestor_AidAttestationServer) error {
@@ -196,13 +158,4 @@ func (p *Plugin) setConfig(config *Config) {
 	p.configMtx.Lock()
 	p.config = config
 	p.configMtx.Unlock()
-}
-
-func (p *Plugin) getConfig() (*Config, error) {
-	p.configMtx.RLock()
-	defer p.configMtx.RUnlock()
-	if p.config == nil {
-		return nil, status.Error(codes.FailedPrecondition, "not configured")
-	}
-	return p.config, nil
 }
