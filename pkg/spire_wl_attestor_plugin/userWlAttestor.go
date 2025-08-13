@@ -3,40 +3,57 @@ package plugin
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
+	pb "spire-pc/proto/user_attestor"
 	"strings"
 	"sync"
 
+	"github.com/coreos/go-oidc"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/hcl"
-	"github.com/spiffe/spire-plugin-sdk/pluginsdk"
 	workloadattestorv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/agent/workloadattestor/v1"
 	configv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/service/common/config/v1"
-	"golang.org/x/oauth2"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
-var (
-	_ pluginsdk.NeedsLogger = (*Plugin)(nil)
-)
+func GetUserAttestationData(ctx context.Context, socketPath string) (*pb.UserAttestation, error) {
+	conn, err := grpc.NewClient(
+		"unix://"+socketPath,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		log.Fatalf("Failed to connect to gRPC server: %v", err)
+	}
+	defer conn.Close()
+
+	client := pb.NewAttestationServiceClient(conn)
+
+	resp, err := client.GetUserAttestation(ctx, &pb.Empty{})
+	if err != nil {
+		log.Fatalf("Error calling GetUserAttestation: %v", err)
+	}
+	return resp, nil
+}
 
 type Config struct {
 	Auth0Domain string `hcl:"auth0_domain"`
+	ClientID    string `hcl:"client_id"`
+	SocketPath  string `hcl:"socket_path"`
 }
 
 type Plugin struct {
 	workloadattestorv1.UnimplementedWorkloadAttestorServer
 	configv1.UnimplementedConfigServer
-	configMtx             sync.RWMutex
-	config                *Config
-	logger                hclog.Logger
-	userAttestationModule *UserAttestorModule
+
+	configMtx sync.RWMutex
+	config    *Config
+	logger    hclog.Logger
 }
 
 type UserInfo struct {
@@ -51,129 +68,99 @@ type UserInfo struct {
 	EmailVerified bool   `json:"email_verified"`
 }
 
-func (p *Plugin) verifyToken(tokenString string) *UserInfo {
+func (p *Plugin) verifyToken(ctx context.Context, idToken string) (*UserInfo, error) {
 	config, err := p.getConfig()
 	if err != nil {
-		p.logger.Error("Failed to get the configuration", "error", err)
-		return nil
+		return nil, fmt.Errorf("failed to get configuration: %w", err)
 	}
 
-	var token oauth2.Token
-	err = json.Unmarshal([]byte(tokenString), &token)
+	// ===== Verify ID Token =====
+	provider, err := oidc.NewProvider(ctx, config.Auth0Domain)
 	if err != nil {
-		fmt.Println("Error unmarshaling token:", err)
+		log.Fatalf("Failed to create OIDC provider: %v", err)
 	}
-	client := oauth2.NewClient(context.Background(), oauth2.StaticTokenSource(&token))
 
-	req, err := http.NewRequest("GET", config.Auth0Domain+"userinfo", nil)
+	verifier := provider.Verifier(&oidc.Config{ClientID: config.ClientID})
+	token, err := verifier.Verify(ctx, idToken)
 	if err != nil {
-		log.Fatal(err)
-	}
-	req.Header.Add("Authorization", "Bearer "+tokenString)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		log.Fatal(err)
+		log.Fatalf("ID Token verification failed: %v", err)
 	}
 
 	var userInfo UserInfo
-	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
-		log.Fatal(err)
+	if err := token.Claims(&userInfo); err != nil {
+		log.Fatalf("Failed to parse claims into UserInfo: %v", err)
 	}
 
-	return &userInfo
+	return &userInfo, nil
 }
 
-func normalizeSelector(input string) string {
-	return strings.ReplaceAll(strings.TrimSpace(strings.ToLower(input)), " ", "_")
-}
-
-func (p *Plugin) getSocketPath(pid string) string {
+func (p *Plugin) getSocketInodes(pid string) (map[string]struct{}, error) {
 	fdDir := filepath.Join("/proc", pid, "fd")
 	fdEntries, err := os.ReadDir(fdDir)
 	if err != nil {
-		p.logger.Error("Failed to read %s: %v\n", fdDir, err)
-		return ""
+		return nil, fmt.Errorf("failed to read %s: %w", fdDir, err)
 	}
 
 	inodes := map[string]struct{}{}
 	for _, entry := range fdEntries {
-		linkPath := filepath.Join(fdDir, entry.Name())
-		target, err := os.Readlink(linkPath)
-		if err != nil {
-			continue
-		}
-
-		if strings.HasPrefix(target, "socket:[") {
+		target, err := os.Readlink(filepath.Join(fdDir, entry.Name()))
+		if err == nil && strings.HasPrefix(target, "socket:[") {
 			inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
 			inodes[inode] = struct{}{}
 		}
 	}
+	return inodes, nil
+}
 
-	if len(inodes) == 0 {
-		p.logger.Error("No sockets found for the given PID.")
-		return ""
-	}
-
+func (p *Plugin) findSocketPathByInodes(inodes map[string]struct{}) (string, error) {
 	f, err := os.Open("/proc/net/unix")
 	if err != nil {
-		p.logger.Error("Failed to open /proc/net/unix: %v\n", err)
-		return ""
+		return "", fmt.Errorf("failed to open /proc/net/unix: %w", err)
 	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := scanner.Text()
-
-		if strings.HasPrefix(line, "Num") {
-			continue
-		}
-
-		fields := strings.Fields(line)
+		fields := strings.Fields(scanner.Text())
 		if len(fields) >= 7 {
 			inode := fields[6]
-			if _, ok := inodes[inode]; ok {
-				path := ""
-				if len(fields) >= 8 {
-					path = fields[7]
-				}
-				if path != "" {
-					return path
-				}
+			if _, ok := inodes[inode]; ok && len(fields) >= 8 {
+				return fields[7], nil
 			}
 		}
 	}
-	return ""
+	return "", nil
+}
+
+func (p *Plugin) getSocketPath(pid string) (string, error) {
+	inodes, err := p.getSocketInodes(pid)
+	if err != nil {
+		return "", err
+	}
+	return p.findSocketPathByInodes(inodes)
 }
 
 func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestRequest) (*workloadattestorv1.AttestResponse, error) {
-	userAttestationModuleSocketPath := p.getSocketPath(fmt.Sprintf("%d", req.Pid))
-
-	if userAttestationModuleSocketPath == "" {
+	socketPath, err := p.getSocketPath(fmt.Sprintf("%d", req.Pid))
+	if err != nil || socketPath == "" {
 		return nil, status.Error(codes.FailedPrecondition, "no user attestation module socket path found")
 	}
 
-	userAttestationModule := NewUserAttestorModule(userAttestationModuleSocketPath)
-	p.setUserAttestationModule(userAttestationModule)
+	if socketPath != p.config.SocketPath {
+		return nil, nil
+	}
 
-	attestationData, err := p.userAttestationModule.GetUserAttestationData()
+	attestationData, err := GetUserAttestationData(ctx, socketPath)
 	if err != nil {
-		p.logger.Error("Failed to get the user attestation token", "error", err)
+		p.logger.Error("Failed to get user attestation token", "error", err)
 		return nil, err
 	}
 
-	attestationDataJSON, err := json.Marshal(attestationData)
+	info, err := p.verifyToken(ctx, attestationData.AccessToken)
 	if err != nil {
-		p.logger.Error("Failed to marshal the user attestation token", "error", err)
+		p.logger.Error("Failed to verify token", "error", err)
 		return nil, err
 	}
-	info := p.verifyToken(string(attestationDataJSON))
 
 	selectors := []string{
 		fmt.Sprintf("sub:%s", normalizeSelector(info.Sub)),
@@ -205,10 +192,6 @@ func (p *Plugin) Configure(ctx context.Context, req *configv1.ConfigureRequest) 
 	return &configv1.ConfigureResponse{}, nil
 }
 
-func (p *Plugin) SetLogger(logger hclog.Logger) {
-	p.logger = logger
-}
-
 func parseConfig(hclConfig string) (*Config, error) {
 	config := new(Config)
 	if err := hcl.Decode(config, hclConfig); err != nil {
@@ -217,8 +200,12 @@ func parseConfig(hclConfig string) (*Config, error) {
 	return config, nil
 }
 
-func (p *Plugin) setUserAttestationModule(userAttestationModule *UserAttestorModule) {
-	p.userAttestationModule = userAttestationModule
+func normalizeSelector(input string) string {
+	return strings.ReplaceAll(strings.TrimSpace(strings.ToLower(input)), " ", "_")
+}
+
+func (p *Plugin) SetLogger(logger hclog.Logger) {
+	p.logger = logger
 }
 
 func (p *Plugin) setConfig(config *Config) {
