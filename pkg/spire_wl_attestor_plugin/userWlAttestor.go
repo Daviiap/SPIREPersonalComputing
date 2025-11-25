@@ -58,12 +58,7 @@ type Plugin struct {
 
 type UserInfo struct {
 	Sub           string `json:"sub"`
-	GivenName     string `json:"given_name"`
-	FamilyName    string `json:"family_name"`
 	Nickname      string `json:"nickname"`
-	Name          string `json:"name"`
-	Picture       string `json:"picture"`
-	UpdatedAt     string `json:"updated_at"`
 	Email         string `json:"email"`
 	EmailVerified bool   `json:"email_verified"`
 }
@@ -75,7 +70,7 @@ func (p *Plugin) verifyToken(ctx context.Context, idToken string) (*UserInfo, er
 	}
 
 	// ===== Verify ID Token =====
-	provider, err := oidc.NewProvider(ctx, config.Auth0Domain)
+	provider, err := oidc.NewProvider(ctx, normalizeAuth0Domain(config.Auth0Domain))
 	if err != nil {
 		log.Fatalf("Failed to create OIDC provider: %v", err)
 	}
@@ -140,6 +135,20 @@ func (p *Plugin) getSocketPath(pid string) (string, error) {
 	return p.findSocketPathByInodes(inodes)
 }
 
+func normalizeAuth0Domain(domain string) string {
+	result := domain
+
+	if !strings.HasPrefix(domain, "https://") {
+		result = "https://" + result
+	}
+
+	if !strings.HasSuffix(domain, "/") {
+		result = result + "/"
+	}
+
+	return result
+}
+
 func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestRequest) (*workloadattestorv1.AttestResponse, error) {
 	socketPath, err := p.getSocketPath(fmt.Sprintf("%d", req.Pid))
 	if err != nil || socketPath == "" {
@@ -164,12 +173,7 @@ func (p *Plugin) Attest(ctx context.Context, req *workloadattestorv1.AttestReque
 
 	selectors := []string{
 		fmt.Sprintf("sub:%s", normalizeSelector(info.Sub)),
-		fmt.Sprintf("given_name:%s", normalizeSelector(info.GivenName)),
-		fmt.Sprintf("family_name:%s", normalizeSelector(info.FamilyName)),
 		fmt.Sprintf("nickname:%s", normalizeSelector(info.Nickname)),
-		fmt.Sprintf("name:%s", normalizeSelector(info.Name)),
-		fmt.Sprintf("picture:%s", normalizeSelector(info.Picture)),
-		fmt.Sprintf("updated_at:%s", normalizeSelector(info.UpdatedAt)),
 		fmt.Sprintf("email:%s", normalizeSelector(info.Email)),
 		fmt.Sprintf("email_verified:%t", info.EmailVerified),
 	}

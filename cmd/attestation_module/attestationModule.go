@@ -101,10 +101,17 @@ func getEnvOrFatal(key string) string {
 }
 
 func normalizeAuth0Domain(domain string) string {
+	result := domain
+
 	if !strings.HasPrefix(domain, "https://") {
-		return "https://" + domain
+		result = "https://" + result
 	}
-	return domain
+
+	if !strings.HasSuffix(domain, "/") {
+		result = result + "/"
+	}
+
+	return result
 }
 
 func authenticateUser(ctx context.Context, env Environment) (string, time.Time, error) {
@@ -204,6 +211,10 @@ func startGRPCServerInBackground(ctx context.Context, socketPath string, idToken
 	lis, err := net.Listen("unix", socketPath)
 	if err != nil {
 		return fmt.Errorf("listening on socket: %w", err)
+	}
+
+	if err := os.Chmod(socketPath, 0600); err != nil {
+		log.Warnf("Failed to set restrictive permissions on socket %s: %v", socketPath, err)
 	}
 
 	grpcServer := grpc.NewServer()
