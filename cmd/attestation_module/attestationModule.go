@@ -259,7 +259,7 @@ func startTokenRefresher(ctx context.Context, env Environment, s *Server) {
 				continue
 			}
 
-			if time.Until(expiry) < 2880*time.Minute {
+			if time.Until(expiry) < 5*time.Minute {
 				ts := oauth2Config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
 				newTok, err := ts.Token()
 				if err != nil {
