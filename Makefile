@@ -1,7 +1,6 @@
 .PHONY: build proto 
 
 build:
-	$(MAKE) proto
 	mkdir -p dist
 	go build -o dist/user_attestor_plugin cmd/spire_wl_attestor_plugin/plugin.go
 	go build -o dist/attestation_module cmd/attestation_module/attestationModule.go

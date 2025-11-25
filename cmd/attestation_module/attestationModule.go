@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 
 type Server struct {
 	pb.UnimplementedAttestationServiceServer
+	mu    sync.RWMutex
 	token TokenInfo
 }
 
@@ -33,8 +35,9 @@ type x509Watcher struct {
 }
 
 type TokenInfo struct {
-	IDToken string `json:"id_token"`
-	Expiry  string `json:"expiry"`
+	IDToken      string `json:"id_token"`
+	Expiry       string `json:"expiry"`
+	RefreshToken string `json:"refresh_token"`
 }
 
 type Environment struct {
@@ -48,6 +51,8 @@ type Environment struct {
 }
 
 func (s *Server) GetUserAttestation(ctx context.Context, in *pb.Empty) (*pb.UserAttestation, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return &pb.UserAttestation{
 		AccessToken: s.token.IDToken,
 		TokenType:   "id_token",
@@ -63,12 +68,22 @@ func main() {
 
 	defer handleInterrupt(cancel)
 
-	idToken, expiry, err := authenticateUser(ctx, env)
+	idToken, expiry, refreshToken, err := authenticateUser(ctx, env)
 	if err != nil {
 		log.Fatalf("Authentication failed: %v", err)
 	}
 
-	if err := startGRPCServerInBackground(ctx, env.GRPCSocketPath, idToken, expiry); err != nil {
+	server := &Server{
+		token: TokenInfo{
+			IDToken:      idToken,
+			Expiry:       expiry.Format(time.RFC3339),
+			RefreshToken: refreshToken,
+		},
+	}
+
+	go startTokenRefresher(ctx, env, server)
+
+	if err := startGRPCServerInBackground(ctx, env.GRPCSocketPath, server); err != nil {
 		log.Fatalf("gRPC server error: %v", err)
 	}
 
@@ -114,16 +129,16 @@ func normalizeAuth0Domain(domain string) string {
 	return result
 }
 
-func authenticateUser(ctx context.Context, env Environment) (string, time.Time, error) {
+func authenticateUser(ctx context.Context, env Environment) (string, time.Time, string, error) {
 	provider, err := oidc.NewProvider(ctx, env.Auth0Domain)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("creating OIDC provider: %w", err)
+		return "", time.Time{}, "", fmt.Errorf("creating OIDC provider: %w", err)
 	}
 
 	oauth2Config := oauth2.Config{
 		ClientID:    env.ClientID,
 		RedirectURL: env.RedirectURI,
-		Scopes:      []string{oidc.ScopeOpenID, "profile", "email"},
+		Scopes:      []string{oidc.ScopeOpenID, "profile", "email", "offline_access"},
 		Endpoint:    provider.Endpoint(),
 	}
 
@@ -135,10 +150,11 @@ func authenticateUser(ctx context.Context, env Environment) (string, time.Time, 
 	return handleAuthCallback(ctx, oauth2Config, env.CallbackPort)
 }
 
-func handleAuthCallback(ctx context.Context, oauth2Config oauth2.Config, callbackPort string) (string, time.Time, error) {
+func handleAuthCallback(ctx context.Context, oauth2Config oauth2.Config, callbackPort string) (string, time.Time, string, error) {
 	loginCh := make(chan struct {
-		idToken string
-		expiry  time.Time
+		idToken      string
+		expiry       time.Time
+		refreshToken string
 	})
 
 	mux := http.NewServeMux()
@@ -161,15 +177,18 @@ func handleAuthCallback(ctx context.Context, oauth2Config oauth2.Config, callbac
 			return
 		}
 
+		refreshToken, _ := token.Extra("refresh_token").(string)
+
 		if err := serveAuthSuccessPage(w); err != nil {
 			http.Error(w, "Error serving success page: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		loginCh <- struct {
-			idToken string
-			expiry  time.Time
-		}{idToken: rawIDToken, expiry: token.Expiry}
+			idToken      string
+			expiry       time.Time
+			refreshToken string
+		}{idToken: rawIDToken, expiry: token.Expiry, refreshToken: refreshToken}
 	})
 
 	server := &http.Server{
@@ -192,7 +211,7 @@ func handleAuthCallback(ctx context.Context, oauth2Config oauth2.Config, callbac
 		log.Errorf("Error shutting down HTTP server: %v", err)
 	}
 
-	return result.idToken, result.expiry, nil
+	return result.idToken, result.expiry, result.refreshToken, nil
 }
 
 func serveAuthSuccessPage(w http.ResponseWriter) error {
@@ -205,7 +224,69 @@ func serveAuthSuccessPage(w http.ResponseWriter) error {
 	return err
 }
 
-func startGRPCServerInBackground(ctx context.Context, socketPath string, idToken string, expiry time.Time) error {
+func startTokenRefresher(ctx context.Context, env Environment, s *Server) {
+	provider, err := oidc.NewProvider(ctx, env.Auth0Domain)
+	if err != nil {
+		log.Errorf("Token Refresher: Failed to create OIDC provider: %v", err)
+		return
+	}
+
+	oauth2Config := oauth2.Config{
+		ClientID: env.ClientID,
+		Endpoint: provider.Endpoint(),
+	}
+
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.mu.RLock()
+			expiryStr := s.token.Expiry
+			refreshToken := s.token.RefreshToken
+			s.mu.RUnlock()
+
+			if refreshToken == "" {
+				continue
+			}
+
+			expiry, err := time.Parse(time.RFC3339, expiryStr)
+			if err != nil {
+				log.Errorf("Failed to parse token expiry: %v", err)
+				continue
+			}
+
+			if time.Until(expiry) < 2880*time.Minute {
+				ts := oauth2Config.TokenSource(ctx, &oauth2.Token{RefreshToken: refreshToken})
+				newTok, err := ts.Token()
+				if err != nil {
+					log.Errorf("Failed to refresh token: %v", err)
+					continue
+				}
+
+				newIDToken, ok := newTok.Extra("id_token").(string)
+				if !ok || newIDToken == "" {
+					log.Error("Refreshed token did not contain ID token")
+					continue
+				}
+
+				s.mu.Lock()
+				s.token.IDToken = newIDToken
+				s.token.Expiry = newTok.Expiry.Format(time.RFC3339)
+				if newTok.RefreshToken != "" {
+					s.token.RefreshToken = newTok.RefreshToken
+				}
+				s.mu.Unlock()
+				log.Info("Token refreshed successfully")
+			}
+		}
+	}
+}
+
+func startGRPCServerInBackground(ctx context.Context, socketPath string, s *Server) error {
 	removeSocketIfExists(socketPath)
 
 	lis, err := net.Listen("unix", socketPath)
@@ -218,11 +299,7 @@ func startGRPCServerInBackground(ctx context.Context, socketPath string, idToken
 	}
 
 	grpcServer := grpc.NewServer()
-	tokenInfoStruct := TokenInfo{
-		IDToken: idToken,
-		Expiry:  expiry.Format(time.RFC3339),
-	}
-	pb.RegisterAttestationServiceServer(grpcServer, &Server{token: tokenInfoStruct})
+	pb.RegisterAttestationServiceServer(grpcServer, s)
 
 	go func() {
 		log.Infof("gRPC server listening on %s", socketPath)
